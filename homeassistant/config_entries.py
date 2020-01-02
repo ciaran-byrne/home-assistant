@@ -24,7 +24,16 @@ SOURCE_IMPORT = "import"
 SOURCE_SSDP = "ssdp"
 SOURCE_USER = "user"
 SOURCE_ZEROCONF = "zeroconf"
+
+# If a user wants to hide a discovery from the UI they can "Ignore" it. The config_entries/ignore_flow
+# websocket command creates a config entry with this source and while it exists normal discoveries
+# with the same unique id are ignored.
 SOURCE_IGNORE = "ignore"
+
+# This is used when a user uses the "Stop Ignoring" button in the UI (the
+# config_entries/ignore_flow websocket command). It's triggered after the "ignore" config entry has
+# been removed and unloaded.
+SOURCE_UNIGNORE = "unignore"
 
 HANDLERS = Registry()
 
@@ -246,6 +255,10 @@ class ConfigEntry:
 
         Returns if unload is possible and was successful.
         """
+        if self.source == SOURCE_IGNORE:
+            self.state = ENTRY_STATE_NOT_LOADED
+            return True
+
         if integration is None:
             integration = await loader.async_get_integration(hass, self.domain)
 
@@ -292,6 +305,9 @@ class ConfigEntry:
 
     async def async_remove(self, hass: HomeAssistant) -> None:
         """Invoke remove callback on component."""
+        if self.source == SOURCE_IGNORE:
+            return
+
         integration = await loader.async_get_integration(hass, self.domain)
         component = integration.get_component()
         if not hasattr(component, "async_remove_entry"):
@@ -453,6 +469,19 @@ class ConfigEntries:
 
         dev_reg.async_clear_config_entry(entry_id)
         ent_reg.async_clear_config_entry(entry_id)
+
+        # After we have fully removed an "ignore" config entry we can try and rediscover it so that a
+        # user is able to immediately start configuring it. We do this by starting a new flow with
+        # the 'unignore' step. If the integration doesn't implement async_step_unignore then
+        # this will be a no-op.
+        if entry.source == SOURCE_IGNORE:
+            self.hass.async_create_task(
+                self.hass.config_entries.flow.async_init(
+                    entry.domain,
+                    context={"source": SOURCE_UNIGNORE},
+                    data={"unique_id": entry.unique_id},
+                )
+            )
 
         return {"require_restart": not unload_success}
 
@@ -819,6 +848,10 @@ class ConfigFlow(data_entry_flow.FlowHandler):
         """Ignore this config flow."""
         await self.async_set_unique_id(user_input["unique_id"], raise_on_progress=False)
         return self.async_create_entry(title="Ignored", data={})
+
+    async def async_step_unignore(self, user_input: Dict[str, Any]) -> Dict[str, Any]:
+        """Rediscover a config entry by it's unique_id."""
+        return self.async_abort(reason="not_implemented")
 
 
 class OptionsFlowManager:
